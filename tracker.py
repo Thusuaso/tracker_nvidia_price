@@ -26,6 +26,21 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+# .env dosyası varsa yükle (opsiyonel — python-dotenv kuruluysa)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    # python-dotenv kurulu değilse .env'i elle oku
+    _env_file = Path(__file__).parent / ".env"
+    if _env_file.exists():
+        for _line in _env_file.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+
 # --------------------------------------------------------------------------
 # Ayarlar
 # --------------------------------------------------------------------------
@@ -52,8 +67,10 @@ REQUEST_TIMEOUT = 25
 
 
 def build_headers(referer: str | None = None) -> dict:
+    ua = random.choice(USER_AGENTS)
+    is_firefox = "Firefox" in ua
     h = {
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         "Accept-Encoding": "gzip, deflate, br",
@@ -63,9 +80,16 @@ def build_headers(referer: str | None = None) -> dict:
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+        "Cache-Control": "max-age=0",
+        "DNT": "1",
     }
+    # Chrome ise Client Hints ekle — 403 yiyen siteler bunu kontrol ediyor
+    if not is_firefox:
+        h.update({
+            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        })
     if referer:
         h["Referer"] = referer
     return h
@@ -166,21 +190,39 @@ AMAZON_BUYBOX_SELECTORS = [
 ]
 
 
-def fetch(session: requests.Session, url: str, referer: str | None = None) -> str | None:
-    try:
-        r = session.get(url, headers=build_headers(referer), timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as e:
-        print(f"    ! istek hatası: {e}")
+def fetch(session: requests.Session, url: str, referer: str | None = None,
+          retries: int = 3) -> str | None:
+    """Sayfayı çeker. Captcha/403 gelirse farklı User-Agent ile tekrar dener."""
+    for attempt in range(1, retries + 1):
+        try:
+            r = session.get(url, headers=build_headers(referer), timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            print(f"    ! istek hatası (deneme {attempt}/{retries}): {e}")
+            time.sleep(random.uniform(2, 4))
+            continue
+
+        if r.status_code == 200:
+            # Amazon captcha kontrolü
+            if "api-services-support@amazon.com" in r.text or "Bot Check" in r.text:
+                print(f"    · captcha geldi (deneme {attempt}/{retries})")
+                if attempt < retries:
+                    session.cookies.clear()  # yeni oturum gibi davran
+                    time.sleep(random.uniform(4, 8))
+                    continue
+                print("    ! captcha aşılamadı")
+                return None
+            return r.text
+
+        if r.status_code in (403, 429, 503):
+            print(f"    · HTTP {r.status_code} (deneme {attempt}/{retries})")
+            if attempt < retries:
+                session.cookies.clear()
+                time.sleep(random.uniform(4, 8))
+                continue
+
+        print(f"    ! HTTP {r.status_code}")
         return None
 
-    if r.status_code == 200:
-        # Amazon captcha kontrolü
-        if "api-services-support@amazon.com" in r.text or "Bot Check" in r.text:
-            print("    ! Amazon captcha/bot kontrolü döndü")
-            return None
-        return r.text
-
-    print(f"    ! HTTP {r.status_code}")
     return None
 
 
@@ -197,42 +239,66 @@ def parse_amazon_buybox(html: str) -> Offer | None:
 
 def fetch_amazon_offers(session: requests.Session, asin: str, product_url: str) -> list[Offer]:
     """
-    AOD (All Offers Display) endpoint'i — Amazon Depo ve diğer satıcı
-    tekliflerini buradan çekiyoruz. Buybox'ta görünmeyen ikinci el
-    fırsatları burada çıkar.
+    AOD (All Offers Display) — Amazon Depo ve diğer satıcı teklifleri.
+    Amazon endpoint'i zaman zaman değiştiği için birkaç varyantı sırayla dener.
     """
     offers: list[Offer] = []
-    aod_url = (
-        f"https://www.amazon.com.tr/gp/aod/ajax/ref=dp_aod_unknown_mbc"
-        f"?asin={asin}&pc=dp&experienceId=aodAjaxMain"
-    )
+
+    # Denenecek endpoint'ler (en güncelden eskiye)
+    endpoints = [
+        f"https://www.amazon.com.tr/gp/product/ajax/ref=dp_aod_ALL_mbc"
+        f"?asin={asin}&m=&qid=&smid=&sourcecustomerorglistid=&sourcecustomerorglistitemid="
+        f"&sr=&pc=dp&experienceId=aodAjaxMain",
+
+        f"https://www.amazon.com.tr/gp/product/ajax"
+        f"?asin={asin}&pc=dp&experienceId=aodAjaxMain",
+
+        f"https://www.amazon.com.tr/gp/aod/ajax/ref=auto_load_aod"
+        f"?asin={asin}&pc=dp",
+
+        f"https://www.amazon.com.tr/gp/offer-listing/{asin}/ref=dp_olp_ALL_mbc?condition=all",
+    ]
+
     headers = build_headers(referer=product_url)
     headers.update({
         "X-Requested-With": "XMLHttpRequest",
+        "Accept": "text/html,*/*",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
     })
 
-    try:
-        r = session.get(aod_url, headers=headers, timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as e:
-        print(f"    ! AOD istek hatası: {e}")
+    html = None
+    for i, url in enumerate(endpoints, 1):
+        try:
+            r = session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            print(f"    ! AOD#{i} istek hatası: {e}")
+            continue
+
+        if r.status_code == 200 and len(r.text) > 500:
+            print(f"    ✓ AOD#{i} çalıştı")
+            html = r.text
+            break
+        print(f"    · AOD#{i} → HTTP {r.status_code}")
+        time.sleep(random.uniform(0.8, 1.5))
+
+    if not html:
+        print("    ! Hiçbir AOD endpoint'i çalışmadı")
         return offers
 
-    if r.status_code != 200:
-        print(f"    ! AOD HTTP {r.status_code}")
-        return offers
+    soup = BeautifulSoup(html, "html.parser")
 
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    # Pinned (buybox) + normal teklifler
-    blocks = soup.select("#aod-pinned-offer, #aod-offer, div[id^='aod-offer']")
+    # Pinned (buybox) + normal teklifler + eski offer-listing formatı
+    blocks = soup.select(
+        "#aod-pinned-offer, #aod-offer, div[id^='aod-offer'], .olpOffer, #aod-offer-list > div"
+    )
     for block in blocks:
         price_el = (
             block.select_one("span.a-price span.a-offscreen")
             or block.select_one(".aok-offscreen")
             or block.select_one("span.a-color-price")
+            or block.select_one(".olpOfferPrice")
         )
         if not price_el:
             continue
@@ -240,10 +306,11 @@ def fetch_amazon_offers(session: requests.Session, asin: str, product_url: str) 
         if not price:
             continue
 
-        # Durum bilgisi (Sıfır / Yenilenmiş / İkinci el - iyi vb.)
         cond_el = (
             block.select_one("#aod-offer-heading h5")
             or block.select_one("div[id*='aod-offer-heading']")
+            or block.select_one("h5")
+            or block.select_one(".olpCondition")
             or block.select_one(".a-text-bold")
         )
         condition = cond_el.get_text(strip=True) if cond_el else "Bilinmiyor"
@@ -252,15 +319,19 @@ def fetch_amazon_offers(session: requests.Session, asin: str, product_url: str) 
             block.select_one("#aod-offer-soldBy a.a-link-normal")
             or block.select_one("#aod-offer-soldBy .a-color-base")
             or block.select_one("div[id*='soldBy'] a")
+            or block.select_one(".olpSellerName")
         )
         seller = seller_el.get_text(strip=True) if seller_el else ""
 
         # Amazon Depo tespiti
         blob = f"{condition} {seller}".lower()
-        if "warehouse" in blob or "depo" in blob:
+        if "warehouse" in blob or "depo" in blob or "outlet" in blob:
             condition = f"AMAZON DEPO — {condition}"
 
         offers.append(Offer(price=price, condition=condition, seller=seller, url=product_url))
+
+    if not offers:
+        print("    · AOD sayfası geldi ama teklif ayrıştırılamadı")
 
     return offers
 
