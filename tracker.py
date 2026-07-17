@@ -163,6 +163,8 @@ class Target:
     kind: str = "generic"           # "amazon" | "generic"
     include_used: bool = True       # Amazon Depo / ikinci el takip edilsin mi
     selectors: list = field(default_factory=list)  # generic için CSS seçiciler
+    min_price: float = 0            # bu fiyatın altı "saçma" kabul edilir (aksesuar vb.)
+    max_price: float = 0            # 0 = sınır yok
 
     @classmethod
     def from_dict(cls, d: dict) -> "Target":
@@ -173,21 +175,113 @@ class Target:
             kind=d.get("kind", "generic"),
             include_used=bool(d.get("include_used", True)),
             selectors=d.get("selectors", []),
+            min_price=float(d.get("min_price", 0)),
+            max_price=float(d.get("max_price", 0)),
         )
+
+    def is_sane(self, price: float) -> bool:
+        """Fiyat mantıklı aralıkta mı? Yanlış elementten okunmuş fiyatları eler."""
+        if self.min_price and price < self.min_price:
+            return False
+        if self.max_price and price > self.max_price:
+            return False
+        return True
 
 
 # --------------------------------------------------------------------------
 # Amazon.com.tr
 # --------------------------------------------------------------------------
 
-AMAZON_BUYBOX_SELECTORS = [
-    "span.a-price[data-a-color='base'] span.a-offscreen",
-    "#corePrice_feature_div span.a-offscreen",
-    "#corePriceDisplay_desktop_feature_div span.a-offscreen",
+# Buybox fiyatı SADECE bu kapsayıcıların içinden okunur.
+# Sayfadaki ilk 'a-price'ı almak yanlış — sponsorlu ürün/karusel fiyatı yakalanıyor.
+AMAZON_BUYBOX_CONTAINERS = [
+    "#corePriceDisplay_desktop_feature_div",
+    "#corePrice_desktop",
+    "#corePrice_feature_div",
+    "#apex_desktop",
+    "#apex_desktop_newAccordionRow",
+    "#buybox",
+    "#desktop_buybox",
+    "#rightCol",
+]
+
+AMAZON_PRICE_SELECTORS = [
+    "span.a-price[data-a-color='base'] > span.a-offscreen",
+    "span.a-price.priceToPay > span.a-offscreen",
+    "span.a-price > span.a-offscreen",
     "#priceblock_ourprice",
     "#priceblock_dealprice",
-    "span.a-price span.a-offscreen",
 ]
+
+# Fiyatın alınmaması gereken bölgeler (reklam, öneri karuselleri)
+AMAZON_EXCLUDE = [
+    "sp_detail", "sponsored", "similarities", "sims-", "carousel",
+    "hero-quick-promo", "olp", "aod", "comparison", "bundle",
+]
+
+
+def _looks_excluded(el) -> bool:
+    """Element reklam/karusel bölgesinde mi?"""
+    node = el
+    for _ in range(12):  # 12 seviye yukarı bak
+        if node is None or not hasattr(node, "get"):
+            break
+        ident = f"{node.get('id', '')} {' '.join(node.get('class', []))}".lower()
+        if any(bad in ident for bad in AMAZON_EXCLUDE):
+            return True
+        node = node.parent
+    return False
+
+
+def extract_page_asin(html: str) -> str | None:
+    """Sayfanın gerçekte hangi ürüne ait olduğunu bulur (yönlendirme kontrolü)."""
+    for pat in (
+        r'id="ASIN"[^>]*value="([A-Z0-9]{10})"',
+        r'"currentAsin"\s*:\s*"([A-Z0-9]{10})"',
+        r'data-asin="([A-Z0-9]{10})"[^>]*data-pageload',
+    ):
+        m = re.search(pat, html)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_amazon_buybox(html: str, expected_asin: str | None = None) -> Offer | None:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) Sayfa gerçekten istediğimiz ürün mü?
+    page_asin = extract_page_asin(html)
+    if expected_asin and page_asin and page_asin != expected_asin:
+        print(f"    ! ASIN uyuşmuyor (beklenen {expected_asin}, sayfa {page_asin}) — atlanıyor")
+        return None
+
+    # 2) Fiyatı SADECE buybox kapsayıcılarının içinde ara
+    for container_sel in AMAZON_BUYBOX_CONTAINERS:
+        container = soup.select_one(container_sel)
+        if not container:
+            continue
+        for price_sel in AMAZON_PRICE_SELECTORS:
+            el = container.select_one(price_sel)
+            if not el or _looks_excluded(el):
+                continue
+            price = parse_price_tr(el.get_text())
+            if price:
+                print(f"    [kaynak: {container_sel}]")
+                return Offer(price=price, condition="Sıfır (Buybox)", seller="Amazon")
+
+    # 3) Son çare: sayfa içi JSON'dan oku (en güvenilir kaynak)
+    m = re.search(r'"priceAmount"\s*:\s*([\d.]+)', html)
+    if m:
+        try:
+            price = float(m.group(1))
+            if price > 0:
+                print("    [kaynak: priceAmount JSON]")
+                return Offer(price=price, condition="Sıfır (Buybox)", seller="Amazon")
+        except ValueError:
+            pass
+
+    print("    ! buybox fiyatı bulunamadı (ürün stokta olmayabilir)")
+    return None
 
 
 def fetch(session: requests.Session, url: str, referer: str | None = None,
@@ -223,17 +317,6 @@ def fetch(session: requests.Session, url: str, referer: str | None = None,
         print(f"    ! HTTP {r.status_code}")
         return None
 
-    return None
-
-
-def parse_amazon_buybox(html: str) -> Offer | None:
-    soup = BeautifulSoup(html, "html.parser")
-    for sel in AMAZON_BUYBOX_SELECTORS:
-        el = soup.select_one(sel)
-        if el:
-            price = parse_price_tr(el.get_text())
-            if price:
-                return Offer(price=price, condition="Sıfır (Buybox)", seller="Amazon")
     return None
 
 
@@ -338,24 +421,30 @@ def fetch_amazon_offers(session: requests.Session, asin: str, product_url: str) 
 
 def check_amazon(session: requests.Session, target: Target) -> list[Offer]:
     print(f"  → Amazon sayfası çekiliyor...")
+    asin = extract_asin(target.url)
     html = fetch(session, target.url)
     found: list[Offer] = []
 
     if html:
-        bb = parse_amazon_buybox(html)
+        bb = parse_amazon_buybox(html, expected_asin=asin)
         if bb:
-            bb.url = target.url
-            found.append(bb)
-            print(f"    Buybox: {fmt_tl(bb.price)}")
+            if target.is_sane(bb.price):
+                bb.url = target.url
+                found.append(bb)
+                print(f"    Buybox: {fmt_tl(bb.price)}")
+            else:
+                print(f"    ! Buybox {fmt_tl(bb.price)} — mantıksız aralıkta, yok sayıldı")
 
-    asin = extract_asin(target.url)
     if asin and target.include_used:
         time.sleep(random.uniform(1.5, 3.0))  # nazik ol
         print(f"    → Tüm teklifler (Depo dahil) çekiliyor... [ASIN: {asin}]")
         aod = fetch_amazon_offers(session, asin, target.url)
         for o in aod:
-            print(f"    Teklif: {fmt_tl(o.price)} — {o.condition} ({o.seller})")
-        found.extend(aod)
+            if target.is_sane(o.price):
+                print(f"    Teklif: {fmt_tl(o.price)} — {o.condition} ({o.seller})")
+                found.append(o)
+            else:
+                print(f"    ! Teklif {fmt_tl(o.price)} — mantıksız, yok sayıldı")
 
     return found
 
