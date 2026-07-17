@@ -1,0 +1,61 @@
+{
+  "_aciklama": "Bu dosyayı 'config.json' olarak kopyala. ASUS ASIN'leri doğrulanmış, hazır. MSI/Gigabyte satırlarındaki ASIN_BURAYA kısımlarını amazon.com.tr'den kendin doldur.",
+  "_kind": "amazon = Amazon.com.tr (Depo/ikinci el dahil taranır) | generic = diğer mağazalar",
+  "_threshold": "Bu fiyatın ALTINA düşerse bildirim gelir (TL)",
+  "_not": "Kullanmayacağın hedefleri sil. Ne kadar az hedef, o kadar az bot-blok riski.",
+
+  "targets": [
+    {
+      "_yorum": "HAZIR — ASUS Prime RTX 5070 Ti 16G, amazon.com.tr'de doğrulandı",
+      "name": "ASUS Prime RTX 5070 Ti 16G — Amazon",
+      "url": "https://www.amazon.com.tr/dp/B0DVH3R5WN",
+      "kind": "amazon",
+      "threshold": 52000,
+      "include_used": true
+    },
+    {
+      "_yorum": "HAZIR — aynı kartın 2. listelemesi. Amazon'da aynı ürün 2 ASIN'le durabilir, ikisini de takip et",
+      "name": "ASUS Prime RTX 5070 Ti 16G (alt listeleme) — Amazon",
+      "url": "https://www.amazon.com.tr/dp/B0DVGVZZYY",
+      "kind": "amazon",
+      "threshold": 52000,
+      "include_used": true
+    },
+    {
+      "_yorum": "HAZIR — ASUS TUF O16G Gaming. Üst segment, normalde pahalı; Depo'da düşerse kaçırma",
+      "name": "ASUS TUF RTX 5070 Ti O16G Gaming — Amazon",
+      "url": "https://www.amazon.com.tr/dp/B0DVH1Y9VN",
+      "kind": "amazon",
+      "threshold": 55000,
+      "include_used": true
+    },
+    {
+      "_yorum": "DOLDUR — amazon.com.tr'de 'MSI RTX 5070 Ti Shadow 3X OC' ara, URL'deki /dp/XXXXXXXXXX kodunu yapıştır",
+      "name": "MSI RTX 5070 Ti Shadow 3X OC — Amazon",
+      "url": "https://www.amazon.com.tr/dp/B0DZD6QV9L",
+      "kind": "amazon",
+      "threshold": 52000,
+      "include_used": true
+    },
+    {
+      "_yorum": "DOLDUR — amazon.com.tr'de 'Gigabyte RTX 5070 Ti Eagle OC SFF' ara",
+      "name": "Gigabyte RTX 5070 Ti Eagle OC SFF — Amazon",
+      "url": "https://www.amazon.com.tr/dp/B0DTGPPVVT",
+      "kind": "amazon",
+      "threshold": 51000,
+      "include_used": true
+    },
+    {
+      "_yorum": "Hepsiburada — ASUS Prime OC. Fiyat bulunamazsa selectors listesini güncelle (README'de anlatıldı)",
+      "name": "ASUS Prime RTX 5070 Ti OC — Hepsiburada",
+      "url": "https://www.hepsiburada.com/asus-prime-rtx5070ti-o16g-nvidia-geforce-rtx-5070-ti-16gb-gddr7-256bit-oc-2xhdmi-3xdp-dlss4-ekran-karti-pm-HBC00007UVU6A",
+      "kind": "generic",
+      "threshold": 53000,
+      "selectors": [
+        "[data-test-id='price-current-price']",
+        "#offering-price",
+        "span[data-bind*='price']"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+name: Fiyat Takip
+
+on:
+  schedule:
+    # Her 5 dakikada bir. (GitHub cron'u yoğunlukta birkaç dk gecikebilir.)
+    - cron: "*/5 * * * *"
+  workflow_dispatch: # Elle de tetikleyebilmek için
+
+# state.json'u geri commit edebilmek için yazma izni
+permissions:
+  contents: write
+
+concurrency:
+  group: fiyat-takip
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Repoyu çek
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      - name: Fiyatları kontrol et
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tracker.py
+
+      - name: Durumu ve fiyat geçmişini kaydet
+        run: |
+          if [[ -n $(git status --porcelain state.json history.csv) ]]; then
+            git config user.name "fiyat-takip-bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add state.json history.csv
+            git commit -m "fiyat güncellemesi — $(date '+%d.%m.%Y %H:%M') [skip ci]"
+            # Paralel çalışan bir job push etmişse çakışmayı çöz
+            git pull --rebase --autostash origin main || true
+            git push
+          else
+            echo "Değişiklik yok"
+          fi
